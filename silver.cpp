@@ -6,14 +6,11 @@
 
 using namespace std;
 
-/**
- * Auto-generated code below aims at helping you parse
- * the standard input according to the problem statement.
- **/
-
 constexpr float K_MAX_THRUST = 100.0f;
 constexpr float K_POD_RADIUS = 400.0f;
+constexpr float K_CHECKPOINT_RADIUS = 600.0f;
 constexpr float K_DEG_TO_RAD = M_PI / 180.0f;
+constexpr float K_EPS = 1e-7f;
 
 //2d math helper
 struct Vec2
@@ -57,69 +54,113 @@ struct Vec2
         float s = sin(rad);
         return {c * x - s * y, s * x + c * y};
     }
+
+    bool operator != (const Vec2& other) const
+    {
+        return (x - other.x) >= K_EPS || (y - other.y) >= K_EPS;
+    }
+};
+
+float clamp01(float x) { return std::clamp(x, 0.0f, 1.0f); }
+float lerp(float a, float b, float t) { return a + (b-a) * clamp01(t); }
+
+struct Ship
+{
+    Vec2 pos;
+    Vec2 prevPos; //position last turn
+    Vec2 velocity;
 };
 
 struct GameState
 {
-    Vec2 posPod; // position of pod
-    Vec2 forwardPod; // forward direction of pod
+    Ship player;
+    Ship enemy;
     Vec2 posCheckpoint; // position of checkpoint
     int nextCheckpointDist; // distance to the next checkpoint
     int nextCheckpointAngle; // angle between your pod orientation and the direction of the next checkpoint
-    Vec2 posEnemy; // position of enemy
 
     bool usedBoost = false;
-    Vec2 dest; // target point to fly towards
-
     int turnCount = 0;
+
+    //output
+    Vec2 dest; // target point to fly towards
+    float thrust;
 
     void ReadInput()
     {
         auto ReadVec = [](Vec2& vec){ int x, y; cin >> x >> y; vec.x = x; vec.y = y; };
 
-        ReadVec(posPod);
+        player.prevPos = player.pos;
+        ReadVec(player.pos);
+
         ReadVec(posCheckpoint);
         cin >> nextCheckpointDist >> nextCheckpointAngle; cin.ignore();
-        ReadVec(posEnemy); cin.ignore();
 
-        forwardPod = (posCheckpoint - posPod).Normalized().Rotate(nextCheckpointAngle * K_DEG_TO_RAD).Normalized();
+        enemy.prevPos = enemy.pos;
+        ReadVec(enemy.pos); cin.ignore();
+
+        if(turnCount > 0)
+        {
+            player.velocity = player.pos - player.prevPos;
+            enemy.velocity = enemy.pos - enemy.prevPos;
+        }
+        else
+        {
+            player.prevPos = player.pos;
+            player.velocity = (posCheckpoint - player.pos).Normalized();
+            enemy.prevPos = enemy.pos;
+            enemy.velocity = (posCheckpoint - enemy.pos).Normalized();
+        }
     }
 };
 
-// Don't push away from the target if we overshot it
-float CalculateAngleMultiplier(const GameState& gs)
+void WriteOutput(float thrust, Vec2 dest, bool boost, bool shield)
 {
-    Vec2 diff = gs.dest - gs.posPod;
-    return (gs.forwardPod.Dot(diff.Normalized()) > 0.0f) ? 1.0f : 0.0f;
+    cout << (int)dest.x << " " << (int)dest.y << " ";
+    if(shield) cout << "SHIELD";
+    else if(boost) cout << "BOOST";
+    else cout << (int)std::clamp(thrust, 0.0f, K_MAX_THRUST);
+    cout << endl;
 }
 
-// Slow down when getting close to target to avoid huge overshotting
-float CalculateDistanceMultiplier(const GameState& gs)
+//outputs the desired travel direction and thrust value
+float CalculateThrust(const GameState& gs)
 {
-    Vec2 diff = gs.dest - gs.posPod;
-    constexpr float threshold = 1500.0f;
-    return std::clamp(diff.Length() / threshold, 0.5f, 1.0f);
+    Vec2 direction = gs.dest - gs.player.pos;
+    float dist = direction.Length();
+
+    float thrust = K_MAX_THRUST;
+    thrust *= clamp01(dist / (K_CHECKPOINT_RADIUS * 2.0f)); //slow down next to checkpoints to avoid overshooting
+
+    //fine steering when not facing away from point
+    if(direction.Normalized().Dot(gs.player.velocity) > 0.0f) //if we end up facing away from next checkpoint
+    {
+        thrust *= clamp01(1.0f - abs(gs.nextCheckpointAngle) / 90.0f);
+    }
+
+    return thrust;
 }
 
 // When catching a long road to the next checkpoint, why not also boost?
-bool ShouldBoost(const GameState& gs, float thrust)
+bool ShouldBoost(const GameState& gs)
 {
     float distToPoint = gs.nextCheckpointDist;
-    return !gs.usedBoost && (gs.nextCheckpointDist > 3000) && (thrust >= K_MAX_THRUST * 0.95f);
+    return !gs.usedBoost && (gs.nextCheckpointDist > 3000) && (gs.nextCheckpointAngle <= 10.0f);
 }
 
 // When enemy gets near, shield self
 bool ShouldShield(const GameState& gs)
 {
-    constexpr float threshold = 2.2f;
-    return (gs.posPod - gs.posEnemy).Length() <= K_POD_RADIUS * threshold;
+    bool enemyIsClose = (gs.player.pos - gs.enemy.pos).Length() <= K_POD_RADIUS * 2.1f;
+    bool impactAngleIsBad = gs.player.velocity.Normalized().Dot(gs.enemy.velocity.Normalized()) <= 0.25f;
+    return enemyIsClose && impactAngleIsBad;
 }
 
 // Don't bother going all the way to the center of the point, use a more outer point of contact
 Vec2 FindBestDestInCheckpoint(const GameState& gs)
 {
     constexpr float radius = 250.0f;
-    Vec2 diff = (gs.posPod - gs.posCheckpoint);
+    Vec2 diff = (gs.player.pos - gs.posCheckpoint);
     return gs.posCheckpoint + diff.Normalized() * radius;
 }
 
@@ -128,28 +169,20 @@ int main()
     GameState gs;
 
     // game loop
-    while (1) {
+    while (1) 
+    {
         gs.ReadInput();
 
         gs.dest = FindBestDestInCheckpoint(gs);
-        int thrust = (int)(K_MAX_THRUST * CalculateAngleMultiplier(gs) * CalculateDistanceMultiplier(gs));
+        gs.thrust = CalculateThrust(gs);
 
-        cout << (int)gs.dest.x << " " << (int)gs.dest.y << " ";
-        
-        if(ShouldShield(gs))
-        {
-            cout << "SHIELD" << endl;
-        }
-        else if(ShouldBoost(gs, thrust))
-        {
-            cout << "BOOST" << endl;
-            gs.usedBoost = true;
-        }
-        else
-        {
-            cout << thrust << endl;
-        }
-        // << thrust << endl;
+        Vec2 targetPos = gs.player.pos + (gs.dest - gs.player.pos).Normalized() * 1000.0f;
+
+        bool useShield = ShouldShield(gs);
+        bool useBoost = !useShield && ShouldBoost(gs);
+        gs.usedBoost = gs.usedBoost || useBoost;
+
+        WriteOutput(gs.thrust, targetPos, useBoost, useShield);
 
         gs.turnCount++;
     }
