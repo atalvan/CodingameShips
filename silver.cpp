@@ -176,7 +176,7 @@ int main()
         gs.dest = FindBestDestInCheckpoint(gs);
         gs.thrust = CalculateThrust(gs);
 
-        Vec2 targetPos = gs.player.pos + (gs.dest - gs.player.pos).Normalized() * 1000.0f;
+        Vec2 targetPos = gs.dest - gs.player.velocity * 2.75f;
 
         bool useShield = ShouldShield(gs);
         bool useBoost = !useShield && ShouldBoost(gs);
