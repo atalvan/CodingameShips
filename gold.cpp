@@ -171,19 +171,24 @@ void EvaluateThrust(const GameState& gs, Ship& ship)
 // When catching a long road to the next checkpoint, why not also boost?
 void EvaluateShouldBoost(const GameState& gs, Ship& ship)
 {
-    float distToPoint = (ship.dest - ship.pos).Length();
-    ship.doBoost = !ship.doShield && !gs.usedBoost && (distToPoint > 3000) && (ship.nextCheckpointAngle <= 10.0f);
+    Vec2 direction = ship.dest - ship.pos;
+    float dist = direction.Length();
+    float dot = direction.Normalized().Dot(ship.velocity.Normalized());
+    ship.doBoost = !ship.doShield && !gs.usedBoost && (dist > 4000) && (dot >= 0.8f); //todo: select best cp instead of random dist check
 }
 
 // When enemy gets near, shield self
 void EvaluateShouldShield(const GameState& gs, Ship& ship)
 {
+    constexpr float impactDistTolerance = K_POD_RADIUS * 2.1f;
     bool doShield = false;
     for(int i=0; i < K_ENEMYCOUNT; ++i)
     {
-        bool enemyIsClose = (ship.pos - gs.enemy[i].pos).Length() <= K_POD_RADIUS * 2.1f;
+        bool enemyIsClose = (ship.pos - gs.enemy[i].pos).Length() <= impactDistTolerance;
+        bool enemyWillImpact = ((ship.pos + ship.velocity) - (gs.enemy[i].pos + gs.enemy[i].velocity)).Length() <= impactDistTolerance;
         bool impactAngleIsBad = ship.velocity.Normalized().Dot(gs.enemy[i].velocity.Normalized()) <= 0.25f;
-        if(enemyIsClose && impactAngleIsBad)
+
+        if((enemyIsClose || enemyWillImpact) && impactAngleIsBad)
         {
             doShield = true;
             break;
