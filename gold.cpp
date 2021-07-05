@@ -13,8 +13,9 @@ constexpr int K_MAX_CHECKPOINTS = 8;
 constexpr float K_DEG_TO_RAD = M_PI / 180.0f;
 constexpr float K_RAD_TO_DEG = 180.0f / M_PI;
 constexpr float K_EPS = 1e-7f;
-constexpr int K_SHIPCOUNT = 2;
+constexpr int K_PLAYERCOUNT = 2;
 constexpr int K_ENEMYCOUNT = 2;
+constexpr int K_TOTAL_SHIPCOUNT = K_PLAYERCOUNT + K_ENEMYCOUNT;
 
 //2d math helper
 struct Vec2
@@ -73,6 +74,11 @@ struct Vec2
 float clamp01(float x) { return std::clamp(x, 0.0f, 1.0f); }
 float lerp(float a, float b, float t) { return a + (b-a) * clamp01(t); }
 
+enum ShipFlags : int
+{
+    IsPlayer = 1 << 0,
+};
+
 struct Ship
 {
     // inputs
@@ -82,10 +88,12 @@ struct Ship
     int nextCheckpointIdx;
 
     //helper vars
+    int id;
+    int flags;
     float nextCheckpointAngle; //degrees
     Vec2 dest;
 
-    //outputs for player ships
+    //outputs
     Vec2 targetCoord;
     float thrust;
     bool doShield;
@@ -98,20 +106,32 @@ struct GameState
     int checkpointCount;
     int lapCount;
 
-    Ship player[K_SHIPCOUNT];
-    Ship enemy[K_ENEMYCOUNT];
+    Ship ships[K_TOTAL_SHIPCOUNT];
 
     bool usedBoost = false;
     int turnCount = 0;
+    int optimalBoostIdx = 0;
 
     void ReadVec (Vec2& vec){ int x, y; cin >> x >> y; vec.x = x; vec.y = y; };
 
-    void ReadCheckpoints()
+    void Initialize()
     {
         cin >> lapCount >> checkpointCount;
         for(int i=0; i < checkpointCount; ++i)
         {
             ReadVec(checkpoints[i]);
+        }
+
+        float bestDist = -1.0f;
+        for(int i=0; i < checkpointCount; ++i)
+        {
+            Vec2 next = checkpoints[(i+1)%checkpointCount];
+            float dist = (next - checkpoints[i]).Length();
+            if(dist > bestDist)
+            {
+                bestDist = dist;
+                optimalBoostIdx = (i+1)%checkpointCount;
+            }
         }
     }
 
@@ -125,19 +145,19 @@ struct GameState
             ship.nextCheckpointAngle = (checkpoints[ship.nextCheckpointIdx] - ship.pos).ToAngle() * K_RAD_TO_DEG;
         };
 
-        for(int i=0; i < K_SHIPCOUNT; ++i)
+        for(int i=0; i < K_TOTAL_SHIPCOUNT; ++i)
         {
-            ReadShip(player[i]);
-        }
-
-        for(int i=0; i < K_ENEMYCOUNT; ++i)
-        {
-            ReadShip(enemy[i]);
+            ReadShip(ships[i]);
+            ships[i].flags |= (i < K_PLAYERCOUNT) ? ShipFlags::IsPlayer : 0;
+            ships[i].id = i;
         }
     }
+
+    Ship& Player(int idx) { return ships[idx]; }
+    Ship& Enemy(int idx) { return ships[idx + K_PLAYERCOUNT]; }
 };
 
-void EvaluateTargetCoord(const GameState& gs, Ship& ship)
+void EvaluateTargetCoord(GameState& gs, Ship& ship)
 {
     // Don't bother going all the way to the center of the point, use a more outer point of contact
     Vec2 point = gs.checkpoints[ship.nextCheckpointIdx];
@@ -150,7 +170,7 @@ void EvaluateTargetCoord(const GameState& gs, Ship& ship)
 }
 
 //outputs the desired travel direction and thrust value
-void EvaluateThrust(const GameState& gs, Ship& ship)
+void EvaluateThrust(GameState& gs, Ship& ship)
 {
     Vec2 direction = ship.dest - ship.pos;
     float dist = direction.Length();
@@ -169,26 +189,28 @@ void EvaluateThrust(const GameState& gs, Ship& ship)
 }
 
 // When catching a long road to the next checkpoint, why not also boost?
-void EvaluateShouldBoost(const GameState& gs, Ship& ship)
+void EvaluateShouldBoost(GameState& gs, Ship& ship)
 {
     Vec2 direction = ship.dest - ship.pos;
     float dist = direction.Length();
     float dot = direction.Normalized().Dot(ship.velocity.Normalized());
-    ship.doBoost = !ship.doShield && !gs.usedBoost && (dist > 4000) && (dot >= 0.8f); //todo: select best cp instead of random dist check
+    ship.doBoost = !ship.doShield && !gs.usedBoost && (ship.nextCheckpointIdx == gs.optimalBoostIdx) && (dot >= 0.9f);
 }
 
 // When enemy gets near, shield self
-void EvaluateShouldShield(const GameState& gs, Ship& ship)
+void EvaluateShouldShield(GameState& gs, Ship& ship)
 {
-    constexpr float impactDistTolerance = K_POD_RADIUS * 2.1f;
+    constexpr float impactDistTolerance = K_POD_RADIUS * 2.0f;
     bool doShield = false;
-    for(int i=0; i < K_ENEMYCOUNT; ++i)
+    for(int i=0; i < K_TOTAL_SHIPCOUNT; ++i)
     {
-        bool enemyIsClose = (ship.pos - gs.enemy[i].pos).Length() <= impactDistTolerance;
-        bool enemyWillImpact = ((ship.pos + ship.velocity) - (gs.enemy[i].pos + gs.enemy[i].velocity)).Length() <= impactDistTolerance;
-        bool impactAngleIsBad = ship.velocity.Normalized().Dot(gs.enemy[i].velocity.Normalized()) <= 0.25f;
+        Ship& other = gs.ships[i];
+        if(other.id == ship.id) continue;
+        if((other.flags & ShipFlags::IsPlayer) == (ship.flags & ShipFlags::IsPlayer)) continue; //maybe not needed
 
-        if((enemyIsClose || enemyWillImpact) && impactAngleIsBad)
+        bool willImpact = ((ship.pos + ship.velocity) - (other.pos + other.velocity)).Length() <= impactDistTolerance;
+        bool impactAngleIsBad = ship.velocity.Normalized().Dot(other.velocity.Normalized()) <= 0.25f;
+        if(willImpact && impactAngleIsBad)
         {
             doShield = true;
             break;
@@ -213,21 +235,21 @@ void WriteOutput(const Ship& ship)
 int main()
 {
     GameState gs;
-    gs.ReadCheckpoints();
+    gs.Initialize();
 
     // game loop
     while (1) 
     {
         gs.ReadInput();
 
-        for(int i=0; i < K_SHIPCOUNT; ++i)
+        for(int i=0; i < K_PLAYERCOUNT; ++i)
         {
-            EvaluateTargetCoord(gs, gs.player[i]);
-            EvaluateThrust(gs, gs.player[i]);
-            EvaluateShouldBoost(gs, gs.player[i]);
-            EvaluateShouldShield(gs, gs.player[i]);
+            EvaluateTargetCoord(gs, gs.Player(i));
+            EvaluateThrust(gs, gs.Player(i));
+            EvaluateShouldBoost(gs, gs.Player(i));
+            EvaluateShouldShield(gs, gs.Player(i));
 
-            WriteOutput(gs.player[i]);
+            WriteOutput(gs.Player(i));
         }
 
         gs.turnCount++;
