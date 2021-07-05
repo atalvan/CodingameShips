@@ -75,11 +75,6 @@ float clamp01(float x) { return std::clamp(x, 0.0f, 1.0f); }
 template<typename T>
 T lerp(T a, T b, float t) { return a + (b-a) * clamp01(t); }
 
-enum ShipFlags : int
-{
-    IsPlayer = 1 << 0,
-};
-
 enum Command
 {
     SeekCheckpoint,
@@ -97,7 +92,7 @@ struct Ship
 
     //helper vars
     int id;
-    int flags;
+    bool isPlayer;
     float nextCheckpointAngle; //degrees
     Vec2 dest;
 
@@ -165,32 +160,29 @@ struct GameState
         for(int i=0; i < K_TOTAL_SHIPCOUNT; ++i)
         {
             ReadShip(ships[i]);
-            ships[i].flags |= (i < K_PLAYERCOUNT) ? ShipFlags::IsPlayer : 0;
+            ships[i].isPlayer = (i < K_PLAYERCOUNT);
             ships[i].id = i;
         }
     }
 
     Ship& Player(int idx) { return ships[idx]; }
     Ship& Enemy(int idx) { return ships[idx + K_PLAYERCOUNT]; }
-    int GetTeamIndex(const Ship& ship) const { return (ship.flags & ShipFlags::IsPlayer) ? 0 : 1; };
 
-    void FindBestShip(int teamIndex, float& shipScore, Ship*& pShip)
+    Ship& FindBestEnemy()
     {
-        shipScore = 1e+8f * -1.0f;
-        pShip = nullptr;
-        for(int i=0; i < K_TOTAL_SHIPCOUNT; ++i)
+        float shipScore = 1e+8f * -1.0f;
+        Ship* pShip = nullptr;
+        for(int i=0; i < K_ENEMYCOUNT; ++i)
         {
-            if(GetTeamIndex(ships[i]) == teamIndex)
+            Ship& enemy = Enemy(i);
+            float score = enemy.checkpointsPassedCount * 20000.0f - (checkpoints[enemy.nextCheckpointIdx] - enemy.pos).Length();
+            if(score > shipScore)
             {
-                float score = ships[i].checkpointsPassedCount * 20000.0f
-                        - (checkpoints[ships[i].nextCheckpointIdx] - ships[i].pos).Length();
-                if(score > shipScore)
-                {
-                    shipScore = score;
-                    pShip = &ships[i];
-                }
+                shipScore = score;
+                pShip = &enemy;
             }
         }
+        return *pShip;
     }
 };
 
@@ -202,9 +194,8 @@ void EvaluateTargetCoord(GameState& gs, Ship& ship)
 
     if(ship.command == Command::BumpStrongestEnemy)
     {
-        float score; Ship* pShip;
-        gs.FindBestShip(1, score, pShip);
-        point = lerp(pShip->pos, gs.checkpoints[(pShip->nextCheckpointIdx + 0)%gs.checkpointCount], 0.5f);
+        Ship& enemy = gs.FindBestEnemy();
+        point = lerp(enemy.pos, gs.checkpoints[enemy.nextCheckpointIdx], 0.5f);
         radius = 100.0f;
     }
     else if(ship.command == Command::SeekCheckpoint)
@@ -229,21 +220,17 @@ void EvaluateThrust(GameState& gs, Ship& ship)
 {
     Vec2 direction = ship.dest - ship.pos;
     float dist = direction.Length();
-
     float thrust = K_MAX_THRUST;
 
-    //if(ship.command != Command::BumpStrongestEnemy)
+    thrust *= clamp01(dist / (K_CHECKPOINT_RADIUS * 2.0f)); //slow down next to checkpoints to avoid overshooting
+
+    //fine steering when not facing away from point
+    float dot = direction.Normalized().Dot(ship.velocity.Normalized());
+    if(dot > 0.0f)
     {
-        thrust *= clamp01(dist / (K_CHECKPOINT_RADIUS * 2.0f)); //slow down next to checkpoints to avoid overshooting
-
-        //fine steering when not facing away from point
-        float dot = direction.Normalized().Dot(ship.velocity.Normalized());
-        if(dot > 0.0f)
-        {
-            thrust *= clamp01(dot);
-        }
+        thrust *= clamp01(dot);
     }
-
+    
     ship.thrust = thrust;
 }
 
@@ -265,18 +252,30 @@ void EvaluateShouldShield(GameState& gs, Ship& ship)
 {
     constexpr float impactDistTolerance = K_POD_RADIUS * 2.0f;
     bool doShield = false;
+    Vec2 shipVelNorm = ship.velocity.Normalized();
+
     for(int i=0; i < K_TOTAL_SHIPCOUNT; ++i)
     {
         Ship& other = gs.ships[i];
         if(other.id == ship.id) continue;
 
         //do not interfere with your checkpoint seeking ally, let him bonk you
-        if(gs.GetTeamIndex(other) == 0 && other.command == Command::SeekCheckpoint) continue;
+        if(other.isPlayer && other.command == Command::SeekCheckpoint) continue;
 
-        bool enemyIsClose = (ship.pos - other.pos).Length() <= impactDistTolerance;
+        bool otherIsClose = (ship.pos - other.pos).Length() <= impactDistTolerance;
         bool willImpact = ((ship.pos + ship.velocity) - (other.pos + other.velocity)).Length() <= impactDistTolerance;
+
+        if(!(otherIsClose || willImpact)) continue;
+
+        bool otherIsInFront = ship.pos.Dot(shipVelNorm) < other.pos.Dot(shipVelNorm);
         bool impactAngleIsBad = ship.velocity.Normalized().Dot(other.velocity.Normalized()) <= 0.25f;
-        if((enemyIsClose || willImpact) && impactAngleIsBad)
+        
+        if(ship.command == Command::BumpStrongestEnemy)
+        {
+            doShield = true;
+            break;
+        }
+        else if((ship.command == Command::SeekCheckpoint) && (impactAngleIsBad || otherIsInFront))
         {
             doShield = true;
             break;
