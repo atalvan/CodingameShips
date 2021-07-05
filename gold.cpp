@@ -72,11 +72,18 @@ struct Vec2
 };
 
 float clamp01(float x) { return std::clamp(x, 0.0f, 1.0f); }
-float lerp(float a, float b, float t) { return a + (b-a) * clamp01(t); }
+template<typename T>
+T lerp(T a, T b, float t) { return a + (b-a) * clamp01(t); }
 
 enum ShipFlags : int
 {
     IsPlayer = 1 << 0,
+};
+
+enum Command
+{
+    SeekCheckpoint,
+    BumpStrongestEnemy
 };
 
 struct Ship
@@ -86,12 +93,16 @@ struct Ship
     Vec2 velocity;
     float angle;
     int nextCheckpointIdx;
+    int checkpointsPassedCount = 0;
 
     //helper vars
     int id;
     int flags;
     float nextCheckpointAngle; //degrees
     Vec2 dest;
+
+    //simulation specific
+    Command command = Command::SeekCheckpoint;
 
     //outputs
     Vec2 targetCoord;
@@ -108,7 +119,7 @@ struct GameState
 
     Ship ships[K_TOTAL_SHIPCOUNT];
 
-    bool usedBoost = false;
+    bool usedBoost;
     int turnCount = 0;
     int optimalBoostIdx = 0;
 
@@ -141,7 +152,13 @@ struct GameState
         {
             ReadVec(ship.pos);
             ReadVec(ship.velocity);
-            cin >> ship.angle >> ship.nextCheckpointIdx;
+            int checkpointIdx;
+            cin >> ship.angle >> checkpointIdx;
+            if(checkpointIdx != ship.nextCheckpointIdx)
+            {
+                ship.nextCheckpointIdx = checkpointIdx;
+                ship.checkpointsPassedCount++;
+            }
             ship.nextCheckpointAngle = (checkpoints[ship.nextCheckpointIdx] - ship.pos).ToAngle() * K_RAD_TO_DEG;
         };
 
@@ -155,18 +172,56 @@ struct GameState
 
     Ship& Player(int idx) { return ships[idx]; }
     Ship& Enemy(int idx) { return ships[idx + K_PLAYERCOUNT]; }
+    int GetTeamIndex(const Ship& ship) const { return (ship.flags & ShipFlags::IsPlayer) ? 0 : 1; };
+
+    void FindBestShip(int teamIndex, float& shipScore, Ship*& pShip)
+    {
+        shipScore = 1e+8f * -1.0f;
+        pShip = nullptr;
+        for(int i=0; i < K_TOTAL_SHIPCOUNT; ++i)
+        {
+            if(GetTeamIndex(ships[i]) == teamIndex)
+            {
+                float score = ships[i].checkpointsPassedCount * 20000.0f
+                        - (checkpoints[ships[i].nextCheckpointIdx] - ships[i].pos).Length();
+                if(score > shipScore)
+                {
+                    shipScore = score;
+                    pShip = &ships[i];
+                }
+            }
+        }
+    }
 };
 
 void EvaluateTargetCoord(GameState& gs, Ship& ship)
 {
-    // Don't bother going all the way to the center of the point, use a more outer point of contact
     Vec2 point = gs.checkpoints[ship.nextCheckpointIdx];
-    constexpr float radius = 250.0f;
+    float radius = 250.0f;
+    float velocityLength = ship.velocity.Length();
+
+    if(ship.command == Command::BumpStrongestEnemy)
+    {
+        float score; Ship* pShip;
+        gs.FindBestShip(1, score, pShip);
+        point = lerp(pShip->pos, gs.checkpoints[(pShip->nextCheckpointIdx + 0)%gs.checkpointCount], 0.5f);
+        radius = 100.0f;
+    }
+    else if(ship.command == Command::SeekCheckpoint)
+    {
+        //if going with high speed towards the point, already prep next point
+        if(velocityLength >= 500.0f && (ship.pos - point).Length() <= 2500.0f)
+        {
+            point = gs.checkpoints[(ship.nextCheckpointIdx+1)%gs.checkpointCount];
+        }
+    }
+
     Vec2 diff = (ship.pos - point);
     ship.dest = point + diff.Normalized() * radius;
 
+    float approach = clamp01(diff.Length() / (K_CHECKPOINT_RADIUS * 2.0f));
     //set up the output target coord accounting for inertia
-    ship.targetCoord = ship.dest - ship.velocity * 2.75f;
+    ship.targetCoord = ship.dest - ship.velocity * 2.75f * approach;
 }
 
 //outputs the desired travel direction and thrust value
@@ -176,13 +231,17 @@ void EvaluateThrust(GameState& gs, Ship& ship)
     float dist = direction.Length();
 
     float thrust = K_MAX_THRUST;
-    thrust *= clamp01(dist / (K_CHECKPOINT_RADIUS * 2.0f)); //slow down next to checkpoints to avoid overshooting
 
-    //fine steering when not facing away from point
-    float dot = direction.Normalized().Dot(ship.velocity.Normalized());
-    if(dot > 0.0f)
+    //if(ship.command != Command::BumpStrongestEnemy)
     {
-        thrust *= clamp01(dot);
+        thrust *= clamp01(dist / (K_CHECKPOINT_RADIUS * 2.0f)); //slow down next to checkpoints to avoid overshooting
+
+        //fine steering when not facing away from point
+        float dot = direction.Normalized().Dot(ship.velocity.Normalized());
+        if(dot > 0.0f)
+        {
+            thrust *= clamp01(dot);
+        }
     }
 
     ship.thrust = thrust;
@@ -191,10 +250,14 @@ void EvaluateThrust(GameState& gs, Ship& ship)
 // When catching a long road to the next checkpoint, why not also boost?
 void EvaluateShouldBoost(GameState& gs, Ship& ship)
 {
-    Vec2 direction = ship.dest - ship.pos;
-    float dist = direction.Length();
-    float dot = direction.Normalized().Dot(ship.velocity.Normalized());
-    ship.doBoost = !ship.doShield && !gs.usedBoost && (ship.nextCheckpointIdx == gs.optimalBoostIdx) && (dot >= 0.9f);
+    if(ship.command != Command::SeekCheckpoint)
+    {
+        ship.doBoost = false;
+        return;
+    }
+
+    ship.doBoost = true;
+    gs.usedBoost = true;
 }
 
 // When enemy gets near, shield self
@@ -206,11 +269,11 @@ void EvaluateShouldShield(GameState& gs, Ship& ship)
     {
         Ship& other = gs.ships[i];
         if(other.id == ship.id) continue;
-        if((other.flags & ShipFlags::IsPlayer) == (ship.flags & ShipFlags::IsPlayer)) continue; //maybe not needed
 
+        bool enemyIsClose = (ship.pos - other.pos).Length() <= impactDistTolerance;
         bool willImpact = ((ship.pos + ship.velocity) - (other.pos + other.velocity)).Length() <= impactDistTolerance;
         bool impactAngleIsBad = ship.velocity.Normalized().Dot(other.velocity.Normalized()) <= 0.25f;
-        if(willImpact && impactAngleIsBad)
+        if((enemyIsClose || willImpact) && impactAngleIsBad)
         {
             doShield = true;
             break;
@@ -226,9 +289,6 @@ void WriteOutput(const Ship& ship)
     if(ship.doShield) cout << "SHIELD";
     else if(ship.doBoost) cout << "BOOST";
     else cout << (int)std::clamp(ship.thrust, 0.0f, K_MAX_THRUST);
-
-    //cout << " debugmsg"; //debug messages
-
     cout << endl;
 }
 
@@ -244,14 +304,22 @@ int main()
 
         for(int i=0; i < K_PLAYERCOUNT; ++i)
         {
+            gs.Player(i).command = (i == 0) ? Command::SeekCheckpoint : Command::BumpStrongestEnemy;
+
             EvaluateTargetCoord(gs, gs.Player(i));
             EvaluateThrust(gs, gs.Player(i));
             EvaluateShouldBoost(gs, gs.Player(i));
             EvaluateShouldShield(gs, gs.Player(i));
+        }
 
+        for(int i=0; i < K_PLAYERCOUNT; ++i)
+        {
             WriteOutput(gs.Player(i));
         }
 
+        //cerr<< " p:" << p << " e:" << e << " " << endl;
+
+        //cout << endl;
         gs.turnCount++;
     }
 }
