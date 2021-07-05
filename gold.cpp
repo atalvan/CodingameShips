@@ -197,7 +197,7 @@ struct GameState
 void EvaluateTargetCoord(GameState& gs, Ship& ship)
 {
     Vec2 point = gs.checkpoints[ship.nextCheckpointIdx];
-    float radius = 250.0f;
+    float radius = 200.0f;
     float velocityLength = ship.velocity.Length();
 
     if(ship.command == Command::BumpStrongestEnemy)
@@ -210,7 +210,7 @@ void EvaluateTargetCoord(GameState& gs, Ship& ship)
     else if(ship.command == Command::SeekCheckpoint)
     {
         //if going with high speed towards the point, already prep next point
-        if(velocityLength >= 500.0f && (ship.pos - point).Length() <= 2500.0f)
+        if(velocityLength >= 400.0f && (ship.pos - point).Length() <= 2000.0f)
         {
             point = gs.checkpoints[(ship.nextCheckpointIdx+1)%gs.checkpointCount];
         }
@@ -269,6 +269,9 @@ void EvaluateShouldShield(GameState& gs, Ship& ship)
     {
         Ship& other = gs.ships[i];
         if(other.id == ship.id) continue;
+
+        //do not interfere with your checkpoint seeking ally, let him bonk you
+        if(gs.GetTeamIndex(other) == 0 && other.command == Command::SeekCheckpoint) continue;
 
         bool enemyIsClose = (ship.pos - other.pos).Length() <= impactDistTolerance;
         bool willImpact = ((ship.pos + ship.velocity) - (other.pos + other.velocity)).Length() <= impactDistTolerance;
